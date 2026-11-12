@@ -4,12 +4,33 @@ Handle vector storage and retrieval
 """
 
 import os
+import threading
+from functools import wraps
 from typing import List, Dict, Optional, Tuple
 import psycopg2
 from psycopg2.extras import execute_values, RealDictCursor
 from pgvector.psycopg2 import register_vector
 import numpy as np
 from datetime import datetime
+
+
+def _synchronized(method):
+    """
+    Serialize access to the shared connection/cursor (Flask serves requests in
+    multiple threads; a psycopg2 cursor must not be used concurrently) and make
+    sure the connection is alive before each operation.
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            self._ensure_connection()
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
+def _to_vector(embedding) -> np.ndarray:
+    """Convert list/array embeddings to float32 numpy (adapted by pgvector)."""
+    return np.asarray(embedding, dtype=np.float32)
 
 
 class VectorDatabase:
@@ -44,6 +65,23 @@ class VectorDatabase:
         
         self.conn = None
         self.cursor = None
+        self._lock = threading.RLock()
+    
+    def _ensure_connection(self):
+        """Reconnect if the connection was closed (e.g. PostgreSQL restarted)"""
+        if self.conn is None or self.conn.closed:
+            print("🔄 Reconnecting to PostgreSQL...")
+            if not self.connect():
+                raise ConnectionError("Tidak dapat terhubung ke database PostgreSQL")
+    
+    def _rollback(self):
+        """Rollback after an error so the connection is usable again
+        (otherwise every next query fails with 'current transaction is aborted')"""
+        try:
+            if self.conn is not None and not self.conn.closed:
+                self.conn.rollback()
+        except Exception:
+            pass
     
     def connect(self):
         """Establish database connection"""
@@ -71,10 +109,11 @@ class VectorDatabase:
         """Close database connection"""
         if self.cursor:
             self.cursor.close()
-        if self.conn:
+        if self.conn and not self.conn.closed:
             self.conn.close()
         print("✅ Database connection closed")
     
+    @_synchronized
     def create_extension(self):
         """Create pgvector extension"""
         try:
@@ -87,6 +126,7 @@ class VectorDatabase:
             self.conn.rollback()
             return False
     
+    @_synchronized
     def create_tables(self):
         """Create tables for document and chunk storage"""
         try:
@@ -149,6 +189,7 @@ class VectorDatabase:
             self.conn.rollback()
             return False
     
+    @_synchronized
     def insert_document(self, filename: str, filepath: str, file_size: int, 
                        total_chunks: int, metadata: Dict = None, full_text: str = "") -> int:
         """
@@ -175,6 +216,7 @@ class VectorDatabase:
             self.conn.rollback()
             return None
     
+    @_synchronized
     def insert_chunks(self, document_id: int, chunks: List[Dict]):
         """
         Insert multiple chunks with embeddings
@@ -190,7 +232,7 @@ class VectorDatabase:
                     chunk.get('chunk_id', i),
                     chunk['text'],
                     chunk.get('char_count', len(chunk['text'])),
-                    chunk['embedding'],  # pgvector will handle the list
+                    _to_vector(chunk['embedding']),
                     psycopg2.extras.Json(chunk.get('metadata', {}))
                 )
                 for i, chunk in enumerate(chunks)
@@ -214,6 +256,7 @@ class VectorDatabase:
             self.conn.rollback()
             return False
     
+    @_synchronized
     def similarity_search(self, query_embedding: List[float], top_k: int = 5, 
                          document_id: int = None) -> List[Dict]:
         """
@@ -241,9 +284,10 @@ class VectorDatabase:
                 JOIN documents d ON c.document_id = d.id
             """
             
+            query_embedding = _to_vector(query_embedding)
             params = [query_embedding]
             
-            if document_id:
+            if document_id is not None:
                 query += " WHERE c.document_id = %s"
                 params.append(document_id)
             
@@ -257,8 +301,10 @@ class VectorDatabase:
         
         except Exception as e:
             print(f"❌ Error in similarity search: {e}")
-            return []
+            self._rollback()
+            raise
     
+    @_synchronized
     def get_document(self, document_id: int) -> Optional[Dict]:
         """Get document by ID"""
         try:
@@ -271,8 +317,10 @@ class VectorDatabase:
         
         except Exception as e:
             print(f"❌ Error getting document: {e}")
+            self._rollback()
             return None
     
+    @_synchronized
     def list_documents(self, limit: int = 100) -> List[Dict]:
         """List all documents"""
         try:
@@ -288,24 +336,29 @@ class VectorDatabase:
         
         except Exception as e:
             print(f"❌ Error listing documents: {e}")
+            self._rollback()
             return []
     
+    @_synchronized
     def delete_document(self, document_id: int) -> bool:
-        """Delete document and all its chunks"""
+        """Delete document and all its chunks. Returns False if it does not exist."""
         try:
             self.cursor.execute("""
                 DELETE FROM documents WHERE id = %s
             """, (document_id,))
+            deleted = self.cursor.rowcount > 0
             
             self.conn.commit()
-            print(f"✅ Document {document_id} deleted")
-            return True
+            if deleted:
+                print(f"✅ Document {document_id} deleted")
+            return deleted
         
         except Exception as e:
             print(f"❌ Error deleting document: {e}")
-            self.conn.rollback()
-            return False
+            self._rollback()
+            raise
     
+    @_synchronized
     def get_stats(self) -> Dict:
         """Get database statistics"""
         try:
@@ -322,4 +375,5 @@ class VectorDatabase:
         
         except Exception as e:
             print(f"❌ Error getting stats: {e}")
+            self._rollback()
             return {}

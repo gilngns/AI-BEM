@@ -42,8 +42,8 @@ def prediksi_penetasan_weather(jumlah_telur, media, temp, humidity, temp_max, we
         telur_per_temp = jumlah_telur / temp
         temp_squared = temp ** 2
         humidity_squared = humidity ** 2
-        temp_level = 0 if temp < 26 else (1 if temp < 29 else 2)
-        humidity_level = 0 if humidity < 75 else (1 if humidity < 85 else 2)
+        temp_level = 0 if temp <= 26 else (1 if temp <= 29 else 2)  # sama dengan pd.cut saat training
+        humidity_level = 0 if humidity <= 75 else (1 if humidity <= 85 else 2)
         optimal_temp = 1 if 27 <= temp <= 30 else 0
         optimal_humidity = 1 if 70 <= humidity <= 80 else 0
         optimal_condition = optimal_temp * optimal_humidity

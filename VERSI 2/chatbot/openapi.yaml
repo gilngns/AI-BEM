@@ -1,0 +1,309 @@
+openapi: 3.0.3
+info:
+  title: Maggot BSF - API Chatbot
+  version: 1.0.0
+  description: |
+    REST API chatbot RAG (Retrieval Augmented Generation) untuk budidaya maggot BSF.
+
+    Alur penggunaan:
+    1. Upload materi PDF lewat `POST /api/upload`.
+    2. Ajukan pertanyaan lewat `POST /api/query` (satu pertanyaan) atau
+       `POST /api/chat` (percakapan dengan riwayat).
+
+    Chatbot **selalu menjawab dalam Bahasa Indonesia** yang sederhana, dalam teks biasa
+    (tanpa Markdown), dan hanya berdasarkan isi PDF yang sudah di-upload.
+    Jika informasi tidak ada di materi, chatbot akan mengatakannya dengan jujur.
+servers:
+  - url: http://localhost:5001
+    description: Server lokal
+tags:
+  - name: Sistem
+  - name: Chatbot
+    description: Tanya jawab berdasarkan dokumen
+  - name: Dokumen
+    description: Kelola materi PDF
+
+paths:
+  /health:
+    get:
+      tags: [Sistem]
+      summary: Cek status server
+      responses:
+        "200":
+          description: Server berjalan normal
+          content:
+            application/json:
+              example: { status: healthy, service: Maggot BSF Chatbot API, version: 1.0.0 }
+
+  /api/query:
+    post:
+      tags: [Chatbot]
+      summary: Ajukan satu pertanyaan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryRequest" }
+      responses:
+        "200":
+          description: |
+            Jawaban chatbot. Jika layanan AI sedang gangguan (misalnya kena batas pemakaian
+            atau tidak ada internet), status tetap 200 dengan `error: true` dan `answer`
+            berisi pesan ramah untuk ditampilkan ke pengguna.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatbotResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/chat:
+    post:
+      tags: [Chatbot]
+      summary: Percakapan multi-giliran (dengan riwayat)
+      description: |
+        Kirim seluruh riwayat percakapan. Pesan `user` terakhir dianggap sebagai pertanyaan.
+        Pertanyaan lanjutan seperti "Lalu apa yang harus dihindari?" akan dipahami
+        berdasarkan pertanyaan sebelumnya. Hanya role `user` dan `assistant` yang dipakai.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatRequest" }
+      responses:
+        "200":
+          description: Jawaban chatbot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatbotResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/upload:
+    post:
+      tags: [Dokumen]
+      summary: Upload materi PDF
+      description: |
+        PDF akan diekstrak teksnya, dipecah menjadi potongan (chunk), diubah menjadi
+        embedding, lalu disimpan ke database. PDF hasil scan membutuhkan OCR
+        (`SKIP_OCR=false` dan Tesseract terpasang).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File PDF (maksimal sesuai MAX_FILE_SIZE, default 50MB)
+      responses:
+        "201":
+          description: Dokumen berhasil diproses
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413":
+          description: File terlalu besar
+          content:
+            application/json:
+              example: { error: "File terlalu besar. Ukuran maksimal 50MB" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/documents:
+    get:
+      tags: [Dokumen]
+      summary: Daftar dokumen yang sudah di-upload
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: Daftar dokumen
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items: { $ref: "#/components/schemas/DocumentSummary" }
+                  count: { type: integer, example: 1 }
+
+  /api/documents/{doc_id}:
+    parameters:
+      - name: doc_id
+        in: path
+        required: true
+        schema: { type: integer }
+    get:
+      tags: [Dokumen]
+      summary: Detail dokumen (termasuk teks lengkap)
+      responses:
+        "200":
+          description: Detail dokumen
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DocumentSummary"
+                  - type: object
+                    properties:
+                      filepath: { type: string }
+                      full_text: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Dokumen]
+      summary: Hapus dokumen beserta semua potongannya
+      responses:
+        "200":
+          description: Dokumen dihapus
+          content:
+            application/json:
+              example: { success: true, message: "Dokumen 2 berhasil dihapus" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/stats:
+    get:
+      tags: [Dokumen]
+      summary: Statistik database
+      responses:
+        "200":
+          description: Statistik
+          content:
+            application/json:
+              example: { total_documents: 1, total_chunks: 81, total_size: 1721663 }
+
+components:
+  schemas:
+    QueryOptions:
+      type: object
+      properties:
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 5
+          description: Jumlah potongan dokumen yang diambil sebagai bahan jawaban
+        min_similarity:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.25
+          description: Ambang kemiripan minimum (default dari MIN_SIMILARITY di .env)
+        document_id:
+          type: integer
+          nullable: true
+          description: Batasi pencarian ke satu dokumen saja (opsional)
+
+    QueryRequest:
+      allOf:
+        - type: object
+          required: [question]
+          properties:
+            question:
+              type: string
+              example: Berapa lama telur maggot menetas?
+        - $ref: "#/components/schemas/QueryOptions"
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+
+    ChatRequest:
+      allOf:
+        - type: object
+          required: [messages]
+          properties:
+            messages:
+              type: array
+              minItems: 1
+              items: { $ref: "#/components/schemas/ChatMessage" }
+              example:
+                - { role: user, content: "Pakan apa yang bagus untuk larva?" }
+                - { role: assistant, content: "Ampas tahu, sisa sayur dan buah, dedak, dan limbah dapur organik." }
+                - { role: user, content: "Lalu apa yang harus dihindari?" }
+        - $ref: "#/components/schemas/QueryOptions"
+
+    Source:
+      type: object
+      description: Potongan dokumen yang dipakai sebagai bahan jawaban (untuk developer, tidak perlu ditampilkan ke pengguna awam)
+      properties:
+        text: { type: string }
+        filename: { type: string }
+        similarity: { type: number, example: 0.81 }
+        chunk_index: { type: integer, example: 12 }
+
+    ChatbotResponse:
+      type: object
+      properties:
+        question: { type: string, example: Berapa lama telur maggot menetas? }
+        answer:
+          type: string
+          description: Jawaban dalam Bahasa Indonesia, teks biasa (tanpa Markdown). Tampilkan ini ke pengguna.
+          example: Telur maggot biasanya menetas dalam waktu sekitar 3 hingga 7 hari, tergantung kondisi kelembaban.
+        model: { type: string, example: openai/gpt-oss-120b }
+        tokens_used: { type: integer, example: 1466 }
+        num_sources: { type: integer, example: 5 }
+        error:
+          type: boolean
+          description: Hanya ada jika layanan AI gagal; `answer` berisi pesan ramah
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/Source" }
+
+    UploadResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        document_id: { type: integer, example: 2 }
+        filename: { type: string, example: Bahan_Ajar_Budidaya_Maggot_BSF.pdf }
+        file_size: { type: integer, description: Byte, example: 1721663 }
+        total_chunks: { type: integer, example: 81 }
+        processing_time: { type: string, example: 3.74s }
+        metadata:
+          type: object
+          properties:
+            num_images: { type: integer, example: 0 }
+            text_length: { type: integer, example: 48370 }
+            ocr_text_length: { type: integer, example: 0 }
+
+    DocumentSummary:
+      type: object
+      properties:
+        id: { type: integer, example: 2 }
+        filename: { type: string }
+        file_size: { type: integer }
+        total_chunks: { type: integer }
+        upload_date: { type: string }
+        metadata: { type: object }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+  responses:
+    BadRequest:
+      description: Input tidak valid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: "Pertanyaan (question) harus berupa teks dan tidak boleh kosong" }
+    NotFound:
+      description: Dokumen tidak ditemukan
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: Dokumen tidak ditemukan }
+    ServerError:
+      description: Kesalahan server
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

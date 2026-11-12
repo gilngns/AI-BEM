@@ -1,0 +1,258 @@
+openapi: 3.0.3
+info:
+  title: Maggot BSF - API Prediksi
+  version: 1.0.0
+  description: |
+    REST API untuk memprediksi **lama penetasan telur** dan **hasil panen** maggot
+    Black Soldier Fly (BSF) menggunakan model machine learning.
+
+    - Model penetasan: Gradient Boosting Classifier (21 fitur)
+    - Model panen: Random Forest Regressor (2 fitur)
+
+    Semua request dan response menggunakan JSON.
+servers:
+  - url: http://localhost:5000
+    description: Server lokal
+tags:
+  - name: Sistem
+    description: Status server dan informasi model
+  - name: Prediksi
+    description: Prediksi penetasan dan panen
+
+paths:
+  /api/health:
+    get:
+      tags: [Sistem]
+      summary: Cek status server
+      responses:
+        "200":
+          description: Server berjalan normal
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: healthy }
+                  timestamp: { type: string, format: date-time }
+                  service: { type: string, example: Maggot ML API }
+                  version: { type: string, example: 1.0.0 }
+
+  /api/info:
+    get:
+      tags: [Sistem]
+      summary: Informasi model dan pilihan nilai kategori
+      description: Gunakan endpoint ini untuk mengisi pilihan dropdown (media, cuaca, musim) di aplikasi.
+      responses:
+        "200":
+          description: Informasi model
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  penetasan_model:
+                    type: object
+                    properties:
+                      name: { type: string, example: Gradient Boosting Classifier }
+                      accuracy: { type: string, example: "78.00%" }
+                      cv_score: { type: string, example: "76.00%" }
+                      num_features: { type: integer, example: 21 }
+                      media_options:
+                        type: array
+                        items: { $ref: "#/components/schemas/MediaTelur" }
+                      weather_options:
+                        type: array
+                        items: { $ref: "#/components/schemas/Cuaca" }
+                      season_options:
+                        type: array
+                        items: { $ref: "#/components/schemas/Musim" }
+                  panen_model:
+                    type: object
+                    properties:
+                      name: { type: string, example: Random Forest }
+                      r2_score: { type: string, example: "0.2994" }
+                      mae: { type: string, example: "802.98 gram" }
+                      mape: { type: string, example: "20.71%" }
+
+  /api/predict/penetasan:
+    post:
+      tags: [Prediksi]
+      summary: Prediksi lama penetasan telur (hari)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PenetasanRequest" }
+      responses:
+        "200":
+          description: Hasil prediksi
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PenetasanResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/predict/panen:
+    post:
+      tags: [Prediksi]
+      summary: Prediksi jumlah hasil panen (gram)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PanenRequest" }
+      responses:
+        "200":
+          description: Hasil prediksi
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PanenResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+components:
+  schemas:
+    MediaTelur:
+      type: string
+      enum:
+        - Ampas atau Limbah Organik Basah
+        - Campuran Media (Kombinasi Kering & Basah)
+        - Dedak atau Bekatul
+        - Kotoran Ternak (Fermentasi)
+    Cuaca:
+      type: string
+      enum: [Clear, Clouds, Rain, Thunderstorm]
+    Musim:
+      type: string
+      enum: [Hujan, Kemarau, Pancaroba]
+
+    PenetasanRequest:
+      type: object
+      required: [jumlah_telur_gram, media_telur, temp, humidity, temp_max, weather_main, season]
+      properties:
+        jumlah_telur_gram:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+          description: Berat telur (gram), harus lebih dari 0
+          example: 100
+        media_telur:
+          $ref: "#/components/schemas/MediaTelur"
+        temp:
+          type: number
+          minimum: 15
+          maximum: 45
+          description: Suhu rata-rata (°C), 15-45
+          example: 29
+        humidity:
+          type: number
+          minimum: 30
+          maximum: 100
+          description: Kelembaban (%), 30-100
+          example: 75
+        temp_max:
+          type: number
+          description: Suhu maksimum (°C), harus lebih besar dari temp
+          example: 31
+        weather_main:
+          $ref: "#/components/schemas/Cuaca"
+        season:
+          $ref: "#/components/schemas/Musim"
+      example:
+        jumlah_telur_gram: 100
+        media_telur: Dedak atau Bekatul
+        temp: 29
+        humidity: 75
+        temp_max: 31
+        weather_main: Clear
+        season: Kemarau
+
+    PenetasanResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        prediction:
+          type: object
+          properties:
+            lama_penetasan_hari: { type: integer, example: 4 }
+            confidence: { type: number, description: Persentase keyakinan model, example: 92.81 }
+            confidence_label: { type: string, enum: [Tinggi, Sedang, Rendah], example: Tinggi }
+        probabilities:
+          type: object
+          description: Probabilitas (%) untuk setiap kemungkinan lama penetasan
+          additionalProperties: { type: number }
+          example: { "3_hari": 2.1, "4_hari": 92.81, "5_hari": 3.5, "6_hari": 1.59 }
+        input_summary:
+          type: object
+          properties:
+            jumlah_telur: { type: string, example: 100.0g }
+            media: { type: string, example: Dedak atau Bekatul }
+            suhu: { type: string, example: "29.0°C" }
+            kelembaban: { type: string, example: "75.0%" }
+            cuaca: { type: string, example: Clear }
+            musim: { type: string, example: Kemarau }
+        recommendations:
+          type: array
+          items: { type: string }
+          example: ["Penetasan cepat! Kondisi sudah optimal."]
+        timestamp: { type: string, format: date-time }
+
+    PanenRequest:
+      type: object
+      required: [jumlah_telur_gram, makanan_gram]
+      properties:
+        jumlah_telur_gram:
+          type: number
+          description: Berat telur (gram), harus lebih dari 0
+          example: 100
+        makanan_gram:
+          type: number
+          description: Total pakan (gram), harus lebih dari 0
+          example: 5000
+
+    PanenResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        prediction:
+          type: object
+          properties:
+            jumlah_panen_gram: { type: number, example: 3932.14 }
+            jumlah_panen_kg: { type: number, example: 3.932 }
+            conversion_rate: { type: number, description: Persentase hasil panen terhadap pakan, example: 78.64 }
+            conversion_label: { type: string, enum: [Sangat Baik, Baik, Cukup, Perlu Perbaikan], example: Sangat Baik }
+        input_summary:
+          type: object
+          properties:
+            jumlah_telur: { type: string, example: 100.0g }
+            makanan: { type: string, example: "5000.0g (5.0 kg)" }
+        business_metrics:
+          type: object
+          description: Estimasi bisnis dengan asumsi harga maggot Rp 15/gram dan pakan Rp 2/gram
+          properties:
+            roi_estimate: { type: number, example: 489.82 }
+            estimated_value: { type: string, example: "Rp 58,982" }
+            feed_cost: { type: string, example: "Rp 10,000" }
+        recommendations:
+          type: array
+          items: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error: { type: string }
+
+  responses:
+    BadRequest:
+      description: Input tidak valid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { success: false, error: "temp must be between 15-45°C" }
+    ServerError:
+      description: Kesalahan server
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

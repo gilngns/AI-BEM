@@ -18,7 +18,7 @@ class AzureOpenAIEmbedding:
         endpoint: str = None,
         deployment: str = None,
         api_version: str = None,
-        dimension: int = 3072
+        dimension: int = None
     ):
         """
         Initialize Azure OpenAI embedding
@@ -34,7 +34,7 @@ class AzureOpenAIEmbedding:
         self.endpoint = endpoint or os.getenv("AZURE_EMBEDDING_ENDPOINT")
         self.deployment = deployment or os.getenv("AZURE_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
         self.api_version = api_version or os.getenv("AZURE_EMBEDDING_API_VERSION", "2023-05-15")
-        self.dimension = dimension
+        self.dimension = dimension or int(os.getenv("EMBEDDING_DIMENSION", 3072))
         
         # Validate configuration
         if not self.api_key:

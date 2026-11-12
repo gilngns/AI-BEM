@@ -16,8 +16,8 @@ pytesseract==0.3.10
 opencv-python==4.8.1.78
 
 # Embeddings & Vector Store
-sentence-transformers==2.2.2
-openai==1.6.1
+sentence-transformers==2.7.0
+openai==1.55.3
 tiktoken==0.5.2
 
 # PostgreSQL & pgvector

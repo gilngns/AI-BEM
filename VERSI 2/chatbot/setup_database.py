@@ -6,6 +6,7 @@ Setup PostgreSQL database for chatbot system
 import os
 import sys
 import psycopg2
+from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from dotenv import load_dotenv
 
@@ -50,13 +51,13 @@ def create_database():
         cur = conn.cursor()
         
         # Check if database exists
-        cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
         exists = cur.fetchone()
         
         if exists:
             print(f"✅ Database '{db_name}' already exists")
         else:
-            cur.execute(f"CREATE DATABASE {db_name}")
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
             print(f"✅ Database '{db_name}' created!")
         
         conn.close()

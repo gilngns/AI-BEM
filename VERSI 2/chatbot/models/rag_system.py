@@ -2,28 +2,112 @@
 RAG (Retrieval Augmented Generation) System
 Combine vector search with LLM generation
 Supports both OpenAI and Azure OpenAI
+Chatbot selalu menjawab dalam Bahasa Indonesia.
 """
 
 import os
+import re
 from typing import List, Dict
+from urllib.parse import urlparse
+
+import numpy as np
 from openai import OpenAI, AzureOpenAI
+
+
+# System prompt default: chatbot WAJIB menjawab dalam Bahasa Indonesia,
+# dengan bahasa sederhana untuk peternak awam, dan dalam teks biasa
+# (tanpa Markdown) supaya tampil rapi di aplikasi.
+DEFAULT_SYSTEM_PROMPT = """Kamu adalah asisten budidaya maggot BSF (Black Soldier Fly) yang ramah dan sabar, seperti penyuluh pertanian yang sedang mengobrol dengan peternak.
+Penggunamu adalah orang awam: peternak atau warga biasa, bukan ahli. Jawab pertanyaan mereka berdasarkan materi budidaya yang diberikan.
+
+Cara menjawab:
+1. SELALU gunakan Bahasa Indonesia sehari-hari yang sederhana, sopan, dan mudah dipahami, apa pun bahasa pertanyaannya.
+2. Jawab langsung ke intinya. Buat jawaban singkat, cukup 1 sampai 3 paragraf pendek. Jika berupa langkah-langkah, tulis sebagai daftar bernomor sederhana (1. 2. 3.), satu langkah per baris.
+3. Hindari istilah ilmiah atau bahasa asing. Jika terpaksa memakai istilah (misalnya prepupa, kasgot, biopond), jelaskan artinya dengan kata-kata sederhana.
+4. Tulis dalam teks biasa. JANGAN memakai format Markdown: tanpa tanda bintang (*), tanpa pagar (#), tanpa tabel, tanpa huruf tebal atau miring.
+5. JANGAN menyebut kata "konteks", "dokumen", nama file, nomor halaman, atau sumber. Sampaikan saja informasinya secara alami.
+6. Gunakan hanya informasi dari materi yang diberikan. Jangan mengarang angka atau fakta. Jika informasinya tidak ada, katakan dengan jujur, misalnya: "Maaf, informasi tentang itu belum ada di materi yang saya punya." Lalu sarankan bertanya ke penyuluh atau peternak maggot berpengalaman jika perlu."""
+
+NO_CONTEXT_TEXT = "Tidak ada materi yang relevan dengan pertanyaan ini."
+
+
+def _friendly_error_message(error: Exception) -> str:
+    """Map LLM/API errors to a message a layperson can understand."""
+    try:
+        import openai
+        if isinstance(error, openai.RateLimitError):
+            return ("Maaf, saat ini sedang banyak pertanyaan yang masuk. "
+                    "Silakan tunggu sekitar 1 menit, lalu coba tanyakan lagi.")
+        if isinstance(error, (openai.APIConnectionError, openai.APITimeoutError)):
+            return ("Maaf, asisten sedang tidak bisa terhubung. "
+                    "Periksa koneksi internet Anda, lalu coba lagi beberapa saat lagi.")
+    except Exception:
+        pass
+    return "Maaf, asisten sedang mengalami gangguan. Silakan coba lagi beberapa saat lagi."
+
+
+def _to_plain_text(text: str) -> str:
+    """Safety net: strip Markdown the model may still produce, so lay users
+    don't see raw symbols like ** or # in the app."""
+    if not text:
+        return text
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        # drop table separator rows like |---|---|
+        if re.fullmatch(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?", stripped):
+            continue
+        # table rows -> "a - b - c"
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            line = " - ".join(c for c in cells if c)
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)        # headings
+        line = re.sub(r"^(\s*)[*+]\s+", r"\1- ", line)       # bullets "* x" -> "- x"
+        lines.append(line)
+    text = "\n".join(lines)
+    text = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: m.group(1) or m.group(2), text)  # bold
+    text = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"\1", text)            # italic
+    text = re.sub(r"`([^`]+)`", r"\1", text)                                             # code
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+ALLOWED_HISTORY_ROLES = {"user", "assistant"}
+
+# Multilingual embedding models give lower cosine scores than English-only
+# ones; 0.3 dropped relevant chunks (e.g. 0.298). Configurable via .env
+# (MIN_SIMILARITY), read at call time because load_dotenv() runs after import.
+DEFAULT_MIN_SIMILARITY = 0.25
+
+
+def _azure_base_endpoint(endpoint: str) -> str:
+    """
+    AzureOpenAI SDK expects only the resource base URL
+    (https://<resource>.openai.azure.com). The .env example uses the full
+    chat/completions URL, which would make the SDK build a doubled path (404).
+    """
+    if not endpoint:
+        return endpoint
+    parsed = urlparse(endpoint)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return endpoint
 
 
 class RAGSystem:
     """Retrieval Augmented Generation system"""
-    
+
     def __init__(
         self,
         vector_db,
         embedder,
-        model: str = "gpt-4-turbo-preview",
+        model: str = None,
         temperature: float = 0.7,
         max_tokens: int = 1000,
         use_azure: bool = None
     ):
         """
         Initialize RAG system
-        
+
         Args:
             vector_db: VectorDatabase instance
             embedder: EmbeddingGenerator instance
@@ -34,89 +118,106 @@ class RAGSystem:
         """
         self.vector_db = vector_db
         self.embedder = embedder
-        
+
         # Check if using Azure OpenAI
         if use_azure is None:
             use_azure = os.getenv("USE_AZURE_OPENAI", "false").lower() == "true"
-        
+
         # Initialize OpenAI client (Azure or Standard)
         if use_azure:
             print("🔵 Using Azure OpenAI for chatbot/LLM")
             self.client = AzureOpenAI(
                 api_key=os.getenv("AZURE_CHATBOT_API_KEY"),
                 api_version=os.getenv("AZURE_CHATBOT_API_VERSION", "2024-02-01"),
-                azure_endpoint=os.getenv("AZURE_CHATBOT_ENDPOINT")
+                azure_endpoint=_azure_base_endpoint(os.getenv("AZURE_CHATBOT_ENDPOINT"))
             )
-            self.model = os.getenv("AZURE_CHATBOT_DEPLOYMENT", "gpt-4o-mini-2")
+            self.model = os.getenv("AZURE_CHATBOT_DEPLOYMENT", "gpt-4o-mini")
         else:
-            print("🟢 Using Standard OpenAI for chatbot/LLM")
-            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            self.model = model
-        
+            # OPENAI_BASE_URL memungkinkan provider lain yang kompatibel dengan
+            # OpenAI API (Groq, Google Gemini, Ollama lokal, LM Studio, dll.)
+            base_url = os.getenv("OPENAI_BASE_URL") or None
+            print(f"🟢 Using OpenAI-compatible API for chatbot/LLM ({base_url or 'api.openai.com'})")
+            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=base_url)
+            self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
         self.temperature = temperature
         self.max_tokens = max_tokens
-        
+
         print(f"✅ RAG System initialized with model: {self.model}")
-    
+
     def retrieve_context(
-        self, 
-        query: str, 
+        self,
+        query: str,
         top_k: int = 5,
         document_id: int = None,
         min_similarity: float = 0.0
     ) -> List[Dict]:
         """
         Retrieve relevant context from vector database
-        
+
         Args:
             query: User query
             top_k: Number of chunks to retrieve
             document_id: Optional filter by document
             min_similarity: Minimum similarity threshold
-            
+
         Returns:
             List of relevant chunks
         """
-        # Generate query embedding
-        query_embedding = self.embedder.generate_embedding(query)
-        
+        # Generate query embedding (np.asarray: some embedders return plain lists)
+        query_embedding = np.asarray(self.embedder.generate_embedding(query), dtype=np.float32)
+
         # Search vector database
         results = self.vector_db.similarity_search(
-            query_embedding=query_embedding.tolist(),
+            query_embedding=query_embedding,
             top_k=top_k,
             document_id=document_id
         )
-        
+
         # Filter by similarity threshold
         filtered_results = [
-            r for r in results 
-            if r.get('similarity', 0) >= min_similarity
+            r for r in results
+            if (r.get('similarity') or 0) >= min_similarity
         ]
-        
+
         return filtered_results
-    
+
     def format_context(self, retrieved_chunks: List[Dict]) -> str:
         """
         Format retrieved chunks into context string
-        
+
         Args:
             retrieved_chunks: List of chunks from retrieval
-            
+
         Returns:
             Formatted context string
         """
         if not retrieved_chunks:
-            return "No relevant context found."
-        
+            return NO_CONTEXT_TEXT
+
         context_parts = []
         for i, chunk in enumerate(retrieved_chunks, 1):
             context_parts.append(
-                f"[Context {i}] (from {chunk['filename']}, similarity: {chunk['similarity']:.2f})\n"
+                f"[Bagian {i}]\n"
                 f"{chunk['text']}\n"
             )
-        
+
         return "\n".join(context_parts)
-    
+
+    @staticmethod
+    def _clean_history(chat_history: List[Dict]) -> List[Dict]:
+        """Keep only valid user/assistant turns (client-sent 'system' messages
+        must not override the Indonesian-language system prompt)."""
+        cleaned = []
+        for m in chat_history or []:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            content = m.get("content")
+            if role in ALLOWED_HISTORY_ROLES and isinstance(content, str) and content.strip():
+                cleaned.append({"role": role, "content": content})
+        return cleaned
+
     def generate_answer(
         self,
         query: str,
@@ -126,42 +227,35 @@ class RAGSystem:
     ) -> Dict:
         """
         Generate answer using LLM with retrieved context
-        
+
         Args:
             query: User query
             context: Retrieved context
             system_prompt: Custom system prompt
             chat_history: Previous conversation history
-            
+
         Returns:
             Dictionary with answer and metadata
         """
-        # Default system prompt (generic for any topic)
         if system_prompt is None:
-            system_prompt = """You are a helpful AI assistant that answers questions based on provided documents.
-Use the provided context to answer questions accurately and comprehensively.
-If the context doesn't contain enough information, say so and provide what you can based on the available context.
-Always cite the source when using information from the context.
-Be clear, concise, and informative in your answers.
-Answer in Indonesian or English based on the question language."""
-        
+            system_prompt = DEFAULT_SYSTEM_PROMPT
+
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]
-        
+
         # Add chat history if provided
-        if chat_history:
-            messages.extend(chat_history)
-        
+        messages.extend(self._clean_history(chat_history))
+
         # Add current query with context
-        user_message = f"""Context:
+        user_message = f"""Materi budidaya:
 {context}
 
-Question: {query}
+Pertanyaan: {query}
 
-Please provide a detailed answer based on the context above."""
-        
+Jawab dalam Bahasa Indonesia sederhana untuk orang awam, singkat dan jelas, dalam teks biasa tanpa Markdown, hanya berdasarkan materi di atas."""
+
         messages.append({"role": "user", "content": user_message})
-        
+
         # Generate response
         try:
             response = self.client.chat.completions.create(
@@ -170,38 +264,42 @@ Please provide a detailed answer based on the context above."""
                 temperature=self.temperature,
                 max_tokens=self.max_tokens
             )
-            
-            answer = response.choices[0].message.content
-            
+
+            answer = _to_plain_text(response.choices[0].message.content or "")
+
             return {
                 "answer": answer,
                 "model": self.model,
-                "tokens_used": response.usage.total_tokens,
+                "tokens_used": response.usage.total_tokens if response.usage else 0,
                 "finish_reason": response.choices[0].finish_reason
             }
-        
+
         except Exception as e:
+            # Technical details go to the server log / "error_detail" for the
+            # developer; the end user (layperson) only sees a friendly message.
             print(f"❌ Error generating answer: {e}")
             return {
-                "answer": f"Error generating answer: {str(e)}",
+                "answer": _friendly_error_message(e),
+                "error_detail": str(e),
                 "model": self.model,
                 "tokens_used": 0,
                 "finish_reason": "error"
             }
-    
+
     def query(
         self,
         question: str,
         top_k: int = 5,
         document_id: int = None,
-        min_similarity: float = 0.3,
+        min_similarity: float = None,
         system_prompt: str = None,
         chat_history: List[Dict] = None,
-        return_sources: bool = True
+        return_sources: bool = True,
+        retrieval_query: str = None
     ) -> Dict:
         """
         Complete RAG pipeline: retrieve + generate
-        
+
         Args:
             question: User question
             top_k: Number of chunks to retrieve
@@ -210,26 +308,30 @@ Please provide a detailed answer based on the context above."""
             system_prompt: Custom system prompt
             chat_history: Previous conversation
             return_sources: Include source chunks in response
-            
+            retrieval_query: Text used for vector search (defaults to question)
+
         Returns:
             Complete response with answer and sources
         """
+        if min_similarity is None:
+            min_similarity = float(os.getenv("MIN_SIMILARITY", DEFAULT_MIN_SIMILARITY))
+
         print(f"🔍 Processing query: {question[:100]}...")
-        
+
         # Step 1: Retrieve relevant context
         print(f"   Retrieving top {top_k} relevant chunks...")
         retrieved_chunks = self.retrieve_context(
-            query=question,
+            query=retrieval_query or question,
             top_k=top_k,
             document_id=document_id,
             min_similarity=min_similarity
         )
-        
+
         print(f"   Found {len(retrieved_chunks)} relevant chunks")
-        
+
         # Step 2: Format context
         context = self.format_context(retrieved_chunks)
-        
+
         # Step 3: Generate answer
         print(f"   Generating answer with {self.model}...")
         answer_data = self.generate_answer(
@@ -238,7 +340,7 @@ Please provide a detailed answer based on the context above."""
             system_prompt=system_prompt,
             chat_history=chat_history
         )
-        
+
         # Build response
         response = {
             "question": question,
@@ -247,7 +349,10 @@ Please provide a detailed answer based on the context above."""
             "tokens_used": answer_data["tokens_used"],
             "num_sources": len(retrieved_chunks)
         }
-        
+
+        if answer_data.get("finish_reason") == "error":
+            response["error"] = True
+
         if return_sources:
             response["sources"] = [
                 {
@@ -258,44 +363,62 @@ Please provide a detailed answer based on the context above."""
                 }
                 for chunk in retrieved_chunks
             ]
-        
+
         print(f"✅ Query complete! Used {answer_data['tokens_used']} tokens")
-        
+
         return response
-    
+
     def chat(
         self,
         messages: List[Dict],
         top_k: int = 5,
         document_id: int = None,
+        min_similarity: float = None,
         system_prompt: str = None
     ) -> Dict:
         """
         Multi-turn conversation with RAG
-        
+
         Args:
             messages: List of message dicts with 'role' and 'content'
             top_k: Number of chunks to retrieve
             document_id: Optional document filter
+            min_similarity: Minimum similarity threshold
             system_prompt: Custom system prompt
-            
+
         Returns:
             Response with answer
         """
-        # Get the last user message as query
-        user_messages = [m for m in messages if m["role"] == "user"]
-        if not user_messages:
-            return {"answer": "No user message found", "error": True}
-        
-        last_query = user_messages[-1]["content"]
-        
-        # Use query method with chat history
-        chat_history = messages[:-1]  # All messages except the last one
-        
+        # Find the last user message (it is the query; it may not be the last item)
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            m = messages[i]
+            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                last_user_idx = i
+                break
+
+        if last_user_idx is None:
+            return {"answer": "Tidak ada pesan dari pengguna.", "error": True}
+
+        last_query = messages[last_user_idx]["content"]
+
+        # History = everything before the last user message (avoid sending it twice)
+        chat_history = messages[:last_user_idx]
+
+        # Follow-up questions ("lalu apa yang harus dihindari?") carry little
+        # meaning alone -> search with the previous user question included
+        retrieval_query = last_query
+        for m in reversed(chat_history):
+            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                retrieval_query = m["content"] + "\n" + last_query
+                break
+
         return self.query(
             question=last_query,
             top_k=top_k,
             document_id=document_id,
+            min_similarity=min_similarity,
             system_prompt=system_prompt,
-            chat_history=chat_history
+            chat_history=chat_history,
+            retrieval_query=retrieval_query
         )

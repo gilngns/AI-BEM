@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import logging
+import os
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -27,19 +28,34 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS untuk akses dari mobile app
 
 # ==================== LOAD MODELS ====================
+# Path model dihitung relatif terhadap file ini, sehingga server bisa
+# dijalankan dari direktori mana pun (bukan hanya dari folder api/)
+MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'models')
+
+
+def _model_path(filename):
+    return os.path.join(MODELS_DIR, filename)
+
+
 try:
     logger.info("Loading models...")
     
     # Load Penetasan model
-    model_penetasan = joblib.load('../models/../models/model_penetasan_maggot.pkl')
-    metadata_penetasan = joblib.load('../models/../models/model_penetasan_metadata.pkl')
-    le_media = joblib.load('../models/../models/label_encoder_media.pkl')
-    le_weather = joblib.load('../models/../models/label_encoder_weather.pkl')
-    le_season = joblib.load('../models/../models/label_encoder_season.pkl')
+    model_penetasan = joblib.load(_model_path('model_penetasan_maggot.pkl'))
+    metadata_penetasan = joblib.load(_model_path('model_penetasan_metadata.pkl'))
+    le_media = joblib.load(_model_path('label_encoder_media.pkl'))
+    le_weather = joblib.load(_model_path('label_encoder_weather.pkl'))
+    le_season = joblib.load(_model_path('label_encoder_season.pkl'))
     
     # Load Panen model
-    model_panen = joblib.load('../models/../models/model_panen_maggot.pkl')
-    metadata_panen = joblib.load('../models/../models/model_panen_metadata.pkl')
+    model_panen = joblib.load(_model_path('model_panen_maggot.pkl'))
+    metadata_panen = joblib.load(_model_path('model_panen_metadata.pkl'))
+    
+    # Prediksi satu baris tidak butuh paralelisme; n_jobs=-1 memicu joblib
+    # multiprocessing yang lambat (dan crash di joblib lama + Python 3.12+)
+    for _m in (model_penetasan, model_panen):
+        if hasattr(_m, 'n_jobs'):
+            _m.n_jobs = 1
     
     logger.info("✓ All models loaded successfully!")
     
@@ -51,7 +67,7 @@ except Exception as e:
 # ==================== HELPER FUNCTIONS ====================
 
 def calculate_engineered_features(jumlah_telur, temp, humidity, temp_max):
-    """Calculate all 14 engineered features"""
+    """Calculate the 10 engineered features (must match create_features() in training)"""
     features = {}
     
     # Interaction features
@@ -63,9 +79,10 @@ def calculate_engineered_features(jumlah_telur, temp, humidity, temp_max):
     features['temp_squared'] = temp ** 2
     features['humidity_squared'] = humidity ** 2
     
-    # Categorical binning
-    features['temp_level'] = 0 if temp < 26 else (1 if temp < 29 else 2)
-    features['humidity_level'] = 0 if humidity < 75 else (1 if humidity < 85 else 2)
+    # Categorical binning - sama dengan pd.cut(bins=[0, 26, 29, 100]) dan
+    # pd.cut(bins=[0, 75, 85, 100]) saat training (batas kanan inklusif)
+    features['temp_level'] = 0 if temp <= 26 else (1 if temp <= 29 else 2)
+    features['humidity_level'] = 0 if humidity <= 75 else (1 if humidity <= 85 else 2)
     
     # Condition indicators
     features['optimal_temp'] = 1 if 27 <= temp <= 30 else 0
@@ -92,6 +109,8 @@ def validate_penetasan_input(data):
         humidity = float(data['humidity'])
         temp_max = float(data['temp_max'])
         
+        if not all(np.isfinite(v) for v in (jumlah_telur, temp, humidity, temp_max)):
+            return False, "Invalid numeric value"
         if jumlah_telur <= 0:
             return False, "jumlah_telur_gram must be positive"
         if temp < 15 or temp > 45:
@@ -101,13 +120,16 @@ def validate_penetasan_input(data):
         if temp_max <= temp:
             return False, "temp_max must be greater than temp"
             
-    except ValueError:
+    except (TypeError, ValueError):
         return False, "Invalid numeric value"
     
     # Validate categorical values
     media = data['media_telur']
     weather = data['weather_main']
     season = data['season']
+    
+    if not all(isinstance(v, str) for v in (media, weather, season)):
+        return False, "media_telur, weather_main, and season must be strings"
     
     if media not in le_media.classes_:
         return False, f"Invalid media_telur. Valid options: {list(le_media.classes_)}"
@@ -133,18 +155,66 @@ def validate_panen_input(data):
         jumlah_telur = float(data['jumlah_telur_gram'])
         makanan = float(data['makanan_gram'])
         
+        if not all(np.isfinite(v) for v in (jumlah_telur, makanan)):
+            return False, "Invalid numeric value"
         if jumlah_telur <= 0:
             return False, "jumlah_telur_gram must be positive"
         if makanan <= 0:
             return False, "makanan_gram must be positive"
             
-    except ValueError:
+    except (TypeError, ValueError):
         return False, "Invalid numeric value"
     
     return True, "Valid"
 
 
 # ==================== API ENDPOINTS ====================
+
+
+# ==================== DOKUMENTASI API (SWAGGER) ====================
+OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'openapi.yaml')
+
+SWAGGER_UI_HTML = """<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>%(title)s</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: "/openapi.yaml",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      tryItOutEnabled: true
+    });
+  </script>
+</body>
+</html>"""
+
+
+@app.route('/openapi.yaml', methods=['GET'])
+def openapi_spec():
+    """OpenAPI specification (YAML)"""
+    import re
+    with open(OPENAPI_SPEC_PATH, encoding='utf-8') as f:
+        spec = f.read()
+    # Point "Try it out" at the host the docs were opened from (localhost,
+    # LAN IP for testing from a phone, ngrok URL, ...)
+    base_url = request.host_url.rstrip('/')
+    spec = re.sub(r'(servers:\s*\n\s*- url: )\S+', lambda m: m.group(1) + base_url, spec, count=1)
+    return app.response_class(spec, mimetype='application/yaml')
+
+
+@app.route('/docs', methods=['GET'])
+@app.route('/docs/', methods=['GET'])
+def swagger_ui():
+    """Swagger UI - dokumentasi API interaktif"""
+    return app.response_class(SWAGGER_UI_HTML % {'title': 'Maggot BSF Prediksi API - Dokumentasi'}, mimetype='text/html')
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -171,7 +241,7 @@ def model_info():
             'season_options': list(le_season.classes_)
         },
         'panen_model': {
-            'name': metadata_panen['model_name'],
+            'name': metadata_panen.get('model_type', metadata_panen.get('model_name', 'Unknown')),
             'r2_score': f"{metadata_panen['r2_score']:.4f}",
             'mae': f"{metadata_panen['mae']:.2f} gram",
             'mape': f"{metadata_panen['mape']:.2f}%"
@@ -197,9 +267,9 @@ def predict_penetasan():
     """
     try:
         # Get request data
-        data = request.get_json()
+        data = request.get_json(silent=True)
         
-        if not data:
+        if not isinstance(data, dict) or not data:
             return jsonify({
                 'success': False,
                 'error': 'No data provided'
@@ -238,8 +308,8 @@ def predict_penetasan():
         is_kemarau = 1 if season == 'Kemarau' else 0
         is_hujan = 1 if season == 'Hujan' else 0
         
-        # Create feature array (21 features in correct order)
-        X_input = np.array([[
+        # Create feature DataFrame (21 features, same order/names as training)
+        X_input = pd.DataFrame([[
             jumlah_telur, temp, humidity, temp_max,
             media_enc, weather_enc, season_enc,
             eng_features['temp_humidity_idx'],
@@ -253,7 +323,7 @@ def predict_penetasan():
             eng_features['optimal_humidity'],
             eng_features['optimal_condition'],
             is_rainy, is_clear, is_kemarau, is_hujan
-        ]])
+        ]], columns=metadata_penetasan['feature_columns'])
         
         # Make prediction
         prediction = int(model_penetasan.predict(X_input)[0])
@@ -312,9 +382,9 @@ def predict_panen():
     """
     try:
         # Get request data
-        data = request.get_json()
+        data = request.get_json(silent=True)
         
-        if not data:
+        if not isinstance(data, dict) or not data:
             return jsonify({
                 'success': False,
                 'error': 'No data provided'
@@ -333,7 +403,8 @@ def predict_panen():
         makanan = float(data['makanan_gram'])
         
         # Create feature array
-        X_input = np.array([[jumlah_telur, makanan]])
+        X_input = pd.DataFrame([[jumlah_telur, makanan]],
+                               columns=metadata_panen['feature_names'])
         
         # Make prediction
         prediction = float(model_panen.predict(X_input)[0])
@@ -468,9 +539,11 @@ if __name__ == '__main__':
     print("  GET  /api/info                - Model information")
     print("  POST /api/predict/penetasan   - Predict hatching time")
     print("  POST /api/predict/panen       - Predict harvest amount")
+    print("  GET  /docs                    - Dokumentasi API (Swagger UI)")
     print("\n" + "="*70)
     print("Server starting on http://0.0.0.0:5000")
     print("="*70 + "\n")
     
     # Run server
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
+    app.run(host='0.0.0.0', port=5000, debug=debug)

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Rahasia / konfigurasi lokal (API key, password database)
+.env
+
+# Materi PDF di root project (isi sudah tersimpan di database chatbot;
+# jangan publikasikan materi milik pihak lain)
+/*.pdf
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
