@@ -1,0 +1,21 @@
+# Versi terkunci untuk server (Python 3.10). Diuji: model .pkl termuat dan kedua endpoint prediksi berhasil.
+# Model .pkl dibuat dengan numpy 2.x dan scikit-learn 1.7.2: numpy 1.x atau scikit-learn lain GAGAL memuat model.
+blinker==1.9.0
+click==8.5.1
+Flask==3.0.0
+Flask-Cors==4.0.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+joblib==1.5.2
+MarkupSafe==3.0.4
+numpy==2.2.6
+pandas==2.2.3
+python-dateutil==3.0.0
+pytz==2026.6
+scikit-learn==1.7.2
+scipy==1.15.3
+six==1.17.0
+threadpoolctl==3.8.0
+tzdata==2026.6
+Werkzeug==3.1.9
+gunicorn==23.0.0
