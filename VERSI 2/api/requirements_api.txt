@@ -4,7 +4,7 @@ flask-cors==4.0.0
 # Harus sama dengan versi yang dipakai saat model .pkl dibuat (1.7.2),
 # versi lain bisa gagal memuat model
 scikit-learn==1.7.2
-numpy>=1.26
+numpy>=2.0  # model .pkl dibuat dengan numpy 2.x; numpy 1.x gagal memuat model
 pandas>=2.1
 joblib>=1.4
 
