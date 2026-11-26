@@ -96,6 +96,17 @@ def _friendly_error_message(error: Exception) -> str:
     return "Maaf, asisten sedang mengalami gangguan. Silakan coba lagi beberapa saat lagi."
 
 
+def _kena_batas(error: Exception) -> bool:
+    """Galat batas kuota / kapasitas penyedia LLM (boleh dicoba dengan model lain)."""
+    try:
+        import openai
+        if isinstance(error, openai.RateLimitError):
+            return True
+    except Exception:
+        pass
+    return getattr(error, "status_code", None) in (429, 498, 503)
+
+
 def _to_plain_text(text: str) -> str:
     """Safety net: strip Markdown the model may still produce, so lay users
     don't see raw symbols like ** or # in the app."""
@@ -194,8 +205,11 @@ class RAGSystem:
         self.max_tokens = max_tokens
         # Model kecil untuk menyaring topik & membalas sapaan (bawaan: model utama).
         self.topic_model = os.getenv("TOPIC_MODEL") or self.model
+        # Model cadangan bila model utama kena batas kuota (bawaan: TOPIC_MODEL bila berbeda).
+        cadangan = os.getenv("FALLBACK_MODEL") or self.topic_model
+        self.fallback_model = cadangan if cadangan and cadangan != self.model else None
 
-        print(f"✅ RAG System initialized with model: {self.model} (topik: {self.topic_model})")
+        print(f"✅ RAG System initialized with model: {self.model} (topik: {self.topic_model}, cadangan: {self.fallback_model or '-'})")
         print(f"   Pencarian internet: {'aktif (Tavily)' if web_search_aktif() else 'tidak aktif (TAVILY_API_KEY kosong)'}")
 
     def retrieve_context(
@@ -280,6 +294,20 @@ class RAGSystem:
             model=model, messages=messages, max_tokens=max_tokens, temperature=temperature, **kwargs
         )
 
+    def _llm_utama(self, messages: List[Dict]):
+        """
+        Panggil model utama. Bila kena batas kuota / kapasitas (429, 498, 503), coba sekali lagi
+        dengan model cadangan supaya pengguna tetap mendapat jawaban.
+        Mengembalikan (response, nama_model_yang_menjawab).
+        """
+        try:
+            return self._llm(self.model, messages, self.max_tokens, self.temperature), self.model
+        except Exception as e:
+            if not self.fallback_model or not _kena_batas(e):
+                raise
+            print(f"⚠️  {self.model} kena batas ({e.__class__.__name__}), pakai model cadangan {self.fallback_model}")
+            return self._llm(self.fallback_model, messages, self.max_tokens, self.temperature), self.fallback_model
+
     @staticmethod
     def _ringkas_riwayat(chat_history: List[Dict], n: int = 4) -> str:
         baris = []
@@ -360,7 +388,7 @@ class RAGSystem:
             "Jawab dalam Bahasa Indonesia sederhana, singkat, teks biasa tanpa Markdown, hanya berdasarkan hasil pencarian di atas."
         )})
         try:
-            res = self._llm(self.model, messages, max_tokens=self.max_tokens, temperature=self.temperature)
+            res, model_dipakai = self._llm_utama(messages)
         except Exception as e:
             print(f"❌ Error generating web answer: {e}")
             return {"answer": _friendly_error_message(e), "error_detail": str(e), "model": self.model,
@@ -371,7 +399,7 @@ class RAGSystem:
             return None
         return {
             "answer": f"{jawaban}\n\n{CATATAN_INTERNET}",
-            "model": self.model,
+            "model": model_dipakai,
             "tokens_used": res.usage.total_tokens if res.usage else 0,
             "finish_reason": res.choices[0].finish_reason,
             "web_sources": [{"title": h["title"], "url": h["url"]} for h in hasil],
@@ -417,18 +445,14 @@ Jawab dalam Bahasa Indonesia sederhana untuk orang awam, singkat dan jelas, dala
 
         # Generate response
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens
-            )
+            # Model utama (berpikir singkat untuk gpt-oss); model cadangan bila kena batas kuota.
+            response, model_dipakai = self._llm_utama(messages)
 
             answer = _to_plain_text(response.choices[0].message.content or "")
 
             return {
                 "answer": answer,
-                "model": self.model,
+                "model": model_dipakai,
                 "tokens_used": response.usage.total_tokens if response.usage else 0,
                 "finish_reason": response.choices[0].finish_reason
             }

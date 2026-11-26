@@ -56,6 +56,30 @@ class FakeLLM:
         return [p[0] for p in self.panggilan]
 
 
+class GalatApi(Exception):
+    def __init__(self, status_code):
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+
+
+class FakeLLMKuota(FakeLLM):
+    """Model utama ('model-utama') kena galat tertentu; model lain normal."""
+
+    def __init__(self, galat_utama, galat_cadangan=None, **kw):
+        super().__init__(**kw)
+        self.galat_utama, self.galat_cadangan = galat_utama, galat_cadangan
+
+    def create(self, model, messages, **kw):
+        if messages[0]["content"] != rs.TOPIC_SYSTEM_PROMPT:
+            if model == "model-utama":
+                self.panggilan.append(("gagal-utama", model, messages, kw))
+                raise self.galat_utama
+            if self.galat_cadangan is not None:
+                self.panggilan.append(("gagal-cadangan", model, messages, kw))
+                raise self.galat_cadangan
+        return super().create(model, messages, **kw)
+
+
 class FakeEmbedder:
     def generate_embedding(self, text):
         return [0.0, 1.0]
@@ -175,6 +199,52 @@ class TestAlurJawaban(unittest.TestCase):
         isi_penyaring = llm.panggilan[0][2][-1]["content"]
         self.assertIn("Pakan maggot apa saja?", isi_penyaring)
         self.assertIn("Pesan terakhir: Kalau nasi basi boleh?", isi_penyaring)
+
+
+
+class TestModelCadangan(unittest.TestCase):
+    def setUp(self):
+        os.environ["TAVILY_API_KEY"] = "tvly-uji"
+
+    def buat(self, llm):
+        r = rs.RAGSystem(vector_db=FakeDB(), embedder=FakeEmbedder(), model="model-utama", use_azure=False)
+        r.client = llm
+        return r
+
+    def test_kuota_habis_pakai_cadangan(self):
+        llm = FakeLLMKuota(GalatApi(429))
+        r = self.buat(llm).query("Kapan maggot dipanen?")
+        self.assertEqual(r["sumber_jawaban"], "materi")
+        self.assertEqual(r["answer"], "Jawaban dari materi.")
+        self.assertEqual(r["model"], "model-kecil")  # TOPIC_MODEL jadi cadangan
+        self.assertFalse(r.get("error", False))
+
+    def test_cadangan_juga_untuk_jawaban_internet(self):
+        llm = FakeLLMKuota(GalatApi(503), materi=rs.PENANDA_TIDAK_ADA)
+        with mock.patch.object(rs, "cari_web", return_value=HASIL_WEB):
+            r = self.buat(llm).query("Kenapa maggot kabur?")
+        self.assertEqual(r["sumber_jawaban"], "internet")
+        self.assertEqual(r["model"], "model-kecil")
+
+    def test_galat_lain_tidak_pindah_model(self):
+        llm = FakeLLMKuota(GalatApi(400))
+        r = self.buat(llm).query("Kapan maggot dipanen?")
+        self.assertTrue(r.get("error"))
+        self.assertNotIn("materi", llm.jenis())  # cadangan tidak dipanggil
+
+    def test_cadangan_juga_gagal_pesan_ramah(self):
+        llm = FakeLLMKuota(GalatApi(429), galat_cadangan=GalatApi(429))
+        r = self.buat(llm).query("Kapan maggot dipanen?")
+        self.assertTrue(r.get("error"))
+        self.assertEqual(llm.jenis().count("gagal-cadangan"), 1)  # dicoba sekali saja
+
+    def test_gpt_oss_diminta_berpikir_singkat(self):
+        llm = FakeLLM()
+        r = rs.RAGSystem(vector_db=FakeDB(), embedder=FakeEmbedder(), model="openai/gpt-oss-120b", use_azure=False)
+        r.client = llm
+        r.query("Kapan maggot dipanen?")
+        kw_materi = [p[3] for p in llm.panggilan if p[0] == "materi"][0]
+        self.assertEqual(kw_materi.get("extra_body"), {"reasoning_effort": "low"})
 
 
 if __name__ == "__main__":
