@@ -106,6 +106,11 @@ USE_AZURE_OPENAI=False
 OPENAI_BASE_URL=https://api.groq.com/openai/v1
 OPENAI_API_KEY=$GROQ_KEY
 OPENAI_MODEL=openai/gpt-oss-120b
+# Model kecil untuk menyaring topik (kuota Groq terpisah dari model utama)
+TOPIC_MODEL=openai/gpt-oss-20b
+# Pencarian internet bila materi PDF tidak menjawab (https://tavily.com). Kosong = tidak aktif.
+TAVILY_API_KEY=
+WEB_SEARCH_MAX_RESULTS=5
 
 SENTENCE_TRANSFORMER_MODEL=paraphrase-multilingual-MiniLM-L12-v2
 VECTOR_DIMENSION=384

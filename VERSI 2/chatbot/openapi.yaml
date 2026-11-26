@@ -251,6 +251,21 @@ components:
         model: { type: string, example: openai/gpt-oss-120b }
         tokens_used: { type: integer, example: 1466 }
         num_sources: { type: integer, example: 5 }
+        sumber_jawaban:
+          type: string
+          enum: [materi, internet, di_luar_topik, sapaan, tidak_ditemukan]
+          description: >
+            Asal jawaban. `materi` = dari PDF; `internet` = materi tidak memuat jawaban sehingga dicari
+            lewat Tavily; `di_luar_topik` = pertanyaan bukan soal maggot BSF / sampah organik (ditolak);
+            `sapaan` = salam / terima kasih; `tidak_ditemukan` = tidak ada di materi maupun internet.
+        web_sources:
+          type: array
+          description: Sumber internet (hanya bila sumber_jawaban = internet)
+          items:
+            type: object
+            properties:
+              title: { type: string }
+              url: { type: string }
         error:
           type: boolean
           description: Hanya ada jika layanan AI gagal; `answer` berisi pesan ramah
